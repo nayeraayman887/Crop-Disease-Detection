@@ -47,20 +47,21 @@ def predict(image_bytes: bytes):
 
     model = load_model()
     array = preprocess_image(image_bytes)
+    predictions = model.predict(array, verbose=0)[0]  # shape: (num_classes,)
 
-    predictions = model.predict(array, verbose=0)[0]
+    top_index = int(np.argmax(predictions))
+    confidence = float(predictions[top_index])
+
+    if top_index >= len(config.CLASS_NAMES):
+        raise ValueError(
+            "Model output size does not match CLASS_NAMES in config.py. "
+            "Update CLASS_NAMES to match the model's output classes."
+        )
 
     probabilities = tf.nn.softmax(predictions).numpy()
 
     top_index = int(np.argmax(probabilities))
-
     confidence = float(probabilities[top_index])
-
-    if top_index >= len(config.CLASS_NAMES):
-        raise ValueError(
-            "Model output has more classes than CLASS_NAMES in config.py. "
-            "Update CLASS_NAMES to match your model's training classes."
-        )
 
     class_name = config.CLASS_NAMES[top_index]
 

@@ -13,4 +13,4 @@ Terminal 1
 uvicorn main:app --reload --port 8000
 
 Terminal 2
-sreamlit run app.py
+streamlit run app.py

@@ -17,7 +17,7 @@ will point to the wrong disease name (the confidence numbers will still look
 fine, so this bug is silent — double check it).
 """
 
-MODEL_PATH = "models\plant_disease_efficientnetb0.keras"
+MODEL_PATH = "models/plant_disease_efficientnetb0.keras"
 
 IMG_SIZE = (224, 224)
 
