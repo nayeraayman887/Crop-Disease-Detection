@@ -46,16 +46,19 @@ def predict(image_bytes: bytes):
     """Runs the model on an image and returns (class_name, confidence)."""
     model = load_model()
     array = preprocess_image(image_bytes)
-    predictions = model.predict(array, verbose=0)[0]  # shape: (num_classes,)
+    predictions = np.asarray(model.predict(array, verbose=0))
+    predictions = predictions.reshape(-1)
 
-    top_index = int(np.argmax(predictions))
-    confidence = float(predictions[top_index])
-
-    if top_index >= len(config.CLASS_NAMES):
+    if predictions.size != len(config.CLASS_NAMES):
         raise ValueError(
-            "Model output has more classes than CLASS_NAMES in config.py. "
-            "Update CLASS_NAMES to match your model's training classes."
+            "Model output size does not match CLASS_NAMES in config.py. "
+            "Update CLASS_NAMES to match the model's output classes."
         )
+
+    probabilities = tf.nn.softmax(predictions).numpy()
+
+    top_index = int(np.argmax(probabilities))
+    confidence = float(probabilities[top_index])
 
     class_name = config.CLASS_NAMES[top_index]
     return class_name, confidence
