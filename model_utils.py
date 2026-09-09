@@ -43,13 +43,18 @@ def preprocess_image(image_bytes: bytes) -> np.ndarray:
 
 
 def predict(image_bytes: bytes):
-    """Runs the model on an image and returns (class_name, confidence)."""
+    """Runs the model on an image and returns (class_name, probability)."""
+
     model = load_model()
     array = preprocess_image(image_bytes)
-    predictions = model.predict(array, verbose=0)[0]  # shape: (num_classes,)
 
-    top_index = int(np.argmax(predictions))
-    confidence = float(predictions[top_index])
+    predictions = model.predict(array, verbose=0)[0]
+
+    probabilities = tf.nn.softmax(predictions).numpy()
+
+    top_index = int(np.argmax(probabilities))
+
+    confidence = float(probabilities[top_index])
 
     if top_index >= len(config.CLASS_NAMES):
         raise ValueError(
@@ -58,4 +63,5 @@ def predict(image_bytes: bytes):
         )
 
     class_name = config.CLASS_NAMES[top_index]
+
     return class_name, confidence
