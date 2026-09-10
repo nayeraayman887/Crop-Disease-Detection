@@ -1,40 +1,152 @@
-import streamlit as st
-from PIL import Image
-import requests
-import model_utils
+import io
+import json
+import os
 
-# ============================================================
-# BACKEND CONNECTION
-# ============================================================
-# While testing locally: run the backend first (uvicorn main:app --port 8000),
-# then this points at it here.
-# Once the backend is deployed (e.g. Hugging Face Spaces), swap this for that
-# URL, e.g. "https://your-username-your-space.hf.space"
-BACKEND_URL = "http://localhost:8000"
+import numpy as np
+import streamlit as st
+import tensorflow as tf
+from PIL import Image
+
+# MODEL CONFIG
+
+MODEL_PATH = "models/plant_disease_efficientnetb0.keras"
+CLASS_NAMES_PATH = "models/class_names.json"
+IMG_SIZE = (224, 224)  # confirm this matches the training notebook
+CONFIDENCE_THRESHOLD = 0.55
+
+FALLBACK_CLASS_NAMES = [
+    "Apple___Apple_scab",
+    "Apple___Black_rot",
+    "Apple___Cedar_apple_rust",
+    "Apple___healthy",
+    "Blueberry___healthy",
+    "Cherry_(including_sour)___Powdery_mildew",
+    "Cherry_(including_sour)___healthy",
+    "Corn_(maize)___Cercospora_leaf_spot Gray_leaf_spot",
+    "Corn_(maize)___Common_rust_",
+    "Corn_(maize)___Northern_Leaf_Blight",
+    "Corn_(maize)___healthy",
+    "Grape___Black_rot",
+    "Grape___Esca_(Black_Measles)",
+    "Grape___Leaf_blight_(Isariopsis_Leaf_Spot)",
+    "Grape___healthy",
+    "Orange___Haunglongbing_(Citrus_greening)",
+    "Peach___Bacterial_spot",
+    "Peach___healthy",
+    "Pepper,_bell___Bacterial_spot",
+    "Pepper,_bell___healthy",
+    "Potato___Early_blight",
+    "Potato___Late_blight",
+    "Potato___healthy",
+    "Raspberry___healthy",
+    "Soybean___healthy",
+    "Squash___Powdery_mildew",
+    "Strawberry___Leaf_scorch",
+    "Strawberry___healthy",
+    "Tomato___Bacterial_spot",
+    "Tomato___Early_blight",
+    "Tomato___Late_blight",
+    "Tomato___Leaf_Mold",
+    "Tomato___Septoria_leaf_spot",
+    "Tomato___Spider_mites Two-spotted_spider_mite",
+    "Tomato___Target_Spot",
+    "Tomato___Tomato_Yellow_Leaf_Curl_Virus",
+    "Tomato___Tomato_mosaic_virus",
+    "Tomato___healthy",
+]
+
+# MODEL LOADING (cached so it only happens once, not per click)
+
+@st.cache_resource
+def load_model():
+    return tf.keras.models.load_model(MODEL_PATH)
+
+
+@st.cache_resource
+def load_class_names():
+    if os.path.exists(CLASS_NAMES_PATH):
+        with open(CLASS_NAMES_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+        elif isinstance(data, dict):
+            return [name for name, _ in sorted(data.items(), key=lambda kv: kv[1])]
+
+    return FALLBACK_CLASS_NAMES
+
+
+@st.cache_resource
+def load_disease_info():
+    with open("disease_info.json", "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def preprocess_image(image: Image.Image) -> np.ndarray:
+    # No manual scaling here on purpose: resnet_v2.preprocess_input is
+    # built into the model graph itself, so we send raw 0-255 pixel values.
+    image = image.convert("RGB").resize(IMG_SIZE)
+    array = np.array(image, dtype=np.float32)
+    array = np.expand_dims(array, axis=0)
+    return array
 
 
 def analyze_image(file_bytes: bytes, filename: str, content_type: str) -> dict:
-    """Sends the image to the FastAPI backend's /predict endpoint and
-    returns the parsed JSON result (or an 'error' status dict if the
-    backend couldn't be reached)."""
+
     try:
-        files = {"file": (filename, file_bytes, content_type)}
-        response = requests.post(f"{BACKEND_URL}/predict", files=files, timeout=30)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.ConnectionError:
+        model = load_model()
+        class_names = load_class_names()
+        disease_info = load_disease_info()
+
+        image = Image.open(io.BytesIO(file_bytes))
+        array = preprocess_image(image)
+        predictions = np.asarray(model.predict(array, verbose=0))
+        predictions = predictions.reshape(-1)
+
+        if predictions.size != len(class_names):
+            return {
+                "status": "error",
+                "message": "Model output size does not match the number of class "
+                           "names. Update class_names.json (or the fallback list) "
+                           "to match the model's actual output classes.",
+            }
+
+        probabilities = tf.nn.softmax(predictions).numpy()
+
+        top_index = int(np.argmax(probabilities))
+        confidence = float(probabilities[top_index])
+
+        if confidence < CONFIDENCE_THRESHOLD:
+            return {
+                "status": "uncertain",
+                "message": "Could not confidently identify a disease. Try a clearer, "
+                           "closer photo of the affected leaf.",
+                "confidence": confidence,
+            }
+
+        class_name = class_names[top_index]
+        info = disease_info.get(class_name)
+
+        if info is None:
+            return {
+                "status": "success",
+                "raw_class": class_name,
+                "confidence": confidence,
+                "message": "Prediction succeeded but no treatment info is on file "
+                           "for this class. Add an entry for it in disease_info.json.",
+            }
+
         return {
-            "status": "error",
-            "message": f"Could not reach the backend at {BACKEND_URL}. "
-                       f"Make sure it's running (uvicorn main:app --port 8000).",
+            "status": "success",
+            "disease": info["common_name"],
+            "confidence": confidence,
+            "description": info["description"],
+            "treatment": info["treatment"],
+            "prevention": info["prevention"],
         }
-    except requests.exceptions.HTTPError as e:
-        return {"status": "error", "message": f"Backend returned an error: {e}"}
+
     except Exception as e:
         return {"status": "error", "message": f"Unexpected error: {e}"}
 
-
-# ============================================================
 # PAGE CONFIGURATION
 
 st.set_page_config(
@@ -44,7 +156,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 # CUSTOM CSS
-# ============================================================
 
 st.markdown("""
 <style>
@@ -121,8 +232,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # HEADER
-# ============================================================
-
 st.markdown(
     '<div class="main-title">🌿 Plant Disease Detection</div>',
     unsafe_allow_html=True
@@ -147,9 +256,7 @@ with st.sidebar:
         "Upload a photo of a plant leaf or take a picture using your camera "
         "to detect possible diseases."
     )
-
     st.divider()
-
     st.subheader("How the app works")
 
     st.write("1️⃣ Upload or take a plant photo")
@@ -166,8 +273,6 @@ tab1, tab2 = st.tabs([
 ])
 
 # FUNCTION: DISPLAY RESULT
-
-
 def display_result(result: dict):
 
     st.markdown(
@@ -176,17 +281,14 @@ def display_result(result: dict):
     )
 
     status = result.get("status")
+    # Something went wrong during inference
 
-    # --------------------------------------------------------
-    # Backend couldn't be reached, or something else went wrong
-    # --------------------------------------------------------
     if status == "error":
         st.error(result.get("message", "Something went wrong analyzing the image."))
         return
 
-    # --------------------------------------------------------
     # Model wasn't confident enough (below CONFIDENCE_THRESHOLD)
-    # --------------------------------------------------------
+
     if status == "uncertain":
         confidence = result.get("confidence", 0) * 100
         st.markdown(
@@ -202,15 +304,13 @@ def display_result(result: dict):
         return
 
     if status != "success":
-        st.error(result.get("message", "Unexpected response from the backend."))
+        st.error(result.get("message", "Unexpected result from the model."))
         return
 
     disease_name = result.get("disease")
     confidence = result.get("confidence", 0) * 100
 
-    # --------------------------------------------------------
-    # Backend predicted a class but disease_info.json has no entry for it
-    # --------------------------------------------------------
+    # Model predicted a class but disease_info.json has no entry for it
     if disease_name is None:
         st.markdown(
             f"""
@@ -224,10 +324,7 @@ def display_result(result: dict):
         )
         st.info(result.get("message", ""))
         return
-
-    # --------------------------------------------------------
     # STATUS — normal healthy / diseased result
-    # --------------------------------------------------------
     is_healthy = disease_name.strip().lower() == "healthy"
 
     if not is_healthy:
@@ -242,7 +339,6 @@ def display_result(result: dict):
             """,
             unsafe_allow_html=True
         )
-
     else:
 
         st.markdown(
@@ -256,13 +352,11 @@ def display_result(result: dict):
             unsafe_allow_html=True)
 
     # DETAILS
-
     description = result.get("description", "")
     treatment = result.get("treatment", [])
     prevention = result.get("prevention", [])
 
     col1, col2 = st.columns(2)
-
     with col1:
 
         st.markdown('<div class="result-card">', unsafe_allow_html=True)
@@ -306,19 +400,17 @@ with tab1:
         col1, col2 = st.columns(2)
         # ORIGINAL IMAGE
         with col1:
-
             st.subheader("🌿 Your Plant")
-            st.image(  image, use_container_width=True )
+            st.image(  image, width='stretch' )
         # ANALYZE BUTTON
 
         with col2:
-
             st.subheader("🤖 AI Analysis")
             st.write(
                 "Click the button below to analyze the plant." )
 
             if st.button(
-                "🔍 Detect Disease",  use_container_width=True ):
+                "🔍 Detect Disease",  width='stretch' ):
 
                 with st.spinner("Analyzing your plant..."):
                     result = analyze_image(
@@ -332,9 +424,7 @@ with tab1:
 with tab2:
 
     st.header("📷 Take a Photo")
-
     st.write("Use your camera to take a picture of the plant leaf.")
-
     camera_photo = st.camera_input( "Take a picture of the plant" )
 
     if camera_photo is not None:
@@ -343,12 +433,10 @@ with tab2:
         st.divider()
         col1, col2 = st.columns(2)
         # CAMERA IMAGE
-        # ----------------------------------------------------
-
         with col1:
 
             st.subheader("📸 Captured Image")
-            st.image( image, use_container_width=True )
+            st.image( image, width='stretch' )
         # ANALYSIS
         with col2:
 
@@ -356,9 +444,8 @@ with tab2:
             if st.button(
                 "🔍 Detect Disease",
                 key="camera_detect",
-                use_container_width=True
+                width='stretch'
             ):
-
                 with st.spinner("Analyzing your plant..."):
                     result = analyze_image(
                         camera_photo.getvalue(),
@@ -366,7 +453,6 @@ with tab2:
                         camera_photo.type,
                     )
                 display_result(result)
-
 # FOOTER
 st.markdown(
     """
